@@ -1,0 +1,562 @@
+---
+title: "Boston Housing Data Case Study"
+author: "Hoda Nassar"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+# Summary
+
+This case study applies seven supervised learning methods to the Boston Housing dataset to predict median home value (`medv`). The models include linear regression with variable selection, pruned regression tree, k-nearest neighbors, random forest, boosting, generalized additive model, and neural network.
+
+The dataset was randomly split into 80% training and 20% testing, and all models were evaluated using in-sample Average Sum Squared Error (ASE) and out-of-sample Mean Squared Prediction Error (MSPE). Based on the final model comparison, Random Forest achieved the lowest out-of-sample MSPE of 11.80, making it the best-performing model for this case study.
+
+# Data Loading
+
+```{r }
+library(MASS)
+library(corrplot)
+library(boot)
+library(rpart)
+library(rpart.plot)
+library(FNN)
+library(randomForest)
+library(gbm)
+library(mgcv)
+library(neuralnet)
+```
+
+```{r}
+data(Boston)
+attach(Boston)
+n <- dim(Boston)[1] 
+p <- dim(Boston)[2]-1 
+```
+
+
+# EDA
+
+## Data Overview
+```{r}
+head(Boston)
+```
+
+```{r}
+summary(Boston)
+```
+
+## Target Variable Exploration
+```{r}
+#histogram of medv
+hist(Boston$medv,
+     main = "Distribution of Median Home Value",
+     xlab = "Median Home Value (medv)",
+     col = "lightgray")
+```
+The histogram shows that median home value (medv) is mostly concentrated around $15,000–$25,000, with fewer observations at very high values.
+
+```{r}
+#boxplot of medv
+boxplot(Boston$medv,
+        main = "Boxplot of Median Home Value",
+        ylab = "medv")
+```
+The boxplot shows several upper-end outliers, suggesting that some neighborhoods have much higher median home values than the majority of the dataset.
+
+## Predictor Variables Exploration
+
+```{r}
+#histograms of selected predictor variables
+hist(Boston$rm, main = "Distribution of Average Rooms", xlab = "rm")
+hist(Boston$lstat, main = "Distribution of Lower Status Population", xlab = "lstat")
+hist(Boston$crim, main = "Distribution of Crime Rate", xlab = "crim")
+```
+The predictor distributions show that rm is approximately centered around 6 rooms and looks fairly balanced, while lstat is right-skewed, with most neighborhoods having lower percentages of lower-status population. The crim variable is extremely right-skewed, meaning most towns have low crime rates, but a small number have very high crime rates, which may act as outliers and affect some models.
+
+## 2.4 Predictor Relationship with medv
+
+```{r}
+#Relationship between medv and lstat
+plot(Boston$lstat, Boston$medv,
+     main = "medv vs lstat",
+     xlab = "Lower Status Population (%)",
+     ylab = "Median Home Value")
+```
+The scatterplot shows that lstat has a strong negative relationship with medv, meaning neighborhoods with a higher percentage of lower-status population tend to have lower median home values.
+
+```{r}
+#Relationship between medv and rm
+plot(Boston$rm, Boston$medv,
+     main = "medv vs rm",
+     xlab = "Average Number of Rooms",
+     ylab = "Median Home Value")
+```
+The scatterplot shows that rm has a positive relationship with medv, meaning homes in areas with more average rooms tend to have higher median values.
+
+```{r}
+#Correlation matrix
+
+corrplot(cor(Boston),
+         method = "color",
+         type = "upper",
+         tl.cex = 0.7)
+```
+The correlation plot supports these relationships: lstat is strongly negatively correlated with medv, while rm is strongly positively correlated with medv. It also shows some correlation among predictors.
+
+# Train-Test Split
+
+```{r}
+set.seed(1234)
+sample_index <- sample(nrow(Boston), nrow(Boston) * 0.80)
+
+Boston_train <- Boston[sample_index, ]
+Boston_test  <- Boston[-sample_index, ]
+
+n_train <- nrow(Boston_train)
+n_test <- nrow(Boston_test)
+```
+
+
+```{r}
+#create an empty table to store results
+results <- data.frame(
+  Model = character(),
+  ASE_in_sample = numeric(),
+  MSPE_out_sample = numeric(),
+  stringsAsFactors = FALSE
+)
+```
+
+# Model Fitting
+
+## Linear Regression with Variable Selection
+
+```{r}
+# Full model using training data only
+lm_full <- lm(medv ~ ., data = Boston_train)
+```
+
+```{r}
+# Stepwise variable selection using AIC
+lm_step <- stepAIC(lm_full, direction = "both", trace = FALSE)
+summary(lm_step)
+```
+
+```{r}
+# In-sample ASE
+lm_pred_train <- predict(lm_step, newdata = Boston_train)
+lm_ase <- round(mean((Boston_train$medv - lm_pred_train)^2),2)
+lm_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+lm_pred_test <- predict(lm_step, newdata = Boston_test)
+lm_mspe <- round(mean((Boston_test$medv - lm_pred_test)^2),2)
+lm_mspe
+```
+
+The linear regression model with variable selection produced an in-sample ASE of 20.64 and an out-of-sample MSPE of 28.22, indicating that the selected linear predictors were able to explain some variation in medv, but the prediction error on the test set remained relatively high.
+
+```{r}
+# add results in table
+results <- rbind(results, data.frame(
+  Model = "Linear Regression with Variable Selection",
+  ASE_in_sample = lm_ase,
+  MSPE_out_sample = lm_mspe
+))
+```
+
+
+## Regression Tree
+
+
+```{r}
+tree_large <- rpart(medv ~ ., 
+                    data = Boston_train,
+                    control = rpart.control(cp = 0.001))
+
+# Plot large tree
+prp(tree_large,
+    digits = 4,
+    extra = 1,
+    box.palette = "auto",
+    main = "Original Regression Tree for Boston Housing")
+```
+
+```{r}
+printcp(tree_large)
+plotcp(tree_large)
+# Select cp
+best_cp <- tree_large$cptable[which.min(tree_large$cptable[, "xerror"]), "CP"]
+best_cp
+```
+
+```{r}
+#tree pruned
+tree_pruned <- prune(tree_large, cp = best_cp)
+
+# Plot pruned tree
+prp(tree_pruned,
+    digits = 4,
+    extra = 1,
+    box.palette = "auto",
+    main = "Pruned Regression Tree for Boston Housing")
+
+```
+
+```{r}
+# In-sample ASE
+tree_pred_train <- predict(tree_pruned, newdata = Boston_train)
+tree_ase <- round(mean((Boston_train$medv - tree_pred_train)^2),2)
+tree_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+tree_pred_test <- predict(tree_pruned, newdata = Boston_test)
+tree_mspe <- round(mean((Boston_test$medv - tree_pred_test)^2),2)
+tree_mspe
+```
+
+The pruned regression tree produced an in-sample ASE of 9.73 and an out-of-sample MSPE of 18.92, showing that the tree captured important split points in the data while keeping the model simpler through pruning.
+
+
+```{r}
+# add results in table
+results <- rbind(results, data.frame(
+  Model = "Pruned Regression Tree",
+  ASE_in_sample = tree_ase,
+  MSPE_out_sample = tree_mspe
+))
+```
+
+
+## K-NN
+
+```{r}
+#Scale Predictors first
+train_x <- Boston_train[, 1:p]
+test_x <- Boston_test[, 1:p]
+
+train_x_scaled <- train_x
+test_x_scaled <- test_x
+
+for (j in colnames(train_x)) {
+  train_min <- min(train_x[[j]])
+  train_max <- max(train_x[[j]])
+  
+  train_x_scaled[[j]] <- (train_x[[j]] - train_min) / (train_max - train_min)
+  test_x_scaled[[j]] <- (test_x[[j]] - train_min) / (train_max - train_min)
+}
+```
+
+```{r}
+#divide train into train2 & validation
+set.seed(1234)
+valid_index <- sample(nrow(train_x_scaled), nrow(train_x_scaled) * 0.80)
+
+x_train2 <- train_x_scaled[valid_index, ]
+y_train2 <- Boston_train$medv[valid_index]
+
+x_valid <- train_x_scaled[-valid_index, ]
+y_valid <- Boston_train$medv[-valid_index]
+
+```
+
+```{r}
+# Try k = 1 to 25
+RMSE_df <- data.frame(
+  k = 1:25,
+  RMSE = rep(0, 25)
+)
+
+for (i in 1:25) {
+  knn_valid <- knn.reg(train = x_train2,
+                       test = x_valid,
+                       y = y_train2,
+                       k = i)
+  
+  RMSE_df$RMSE[i] <- sqrt(mean((y_valid - knn_valid$pred)^2))
+}
+
+RMSE_df
+
+# Plot validation RMSE by k
+plot(RMSE_df$k, RMSE_df$RMSE,
+     type = "b",
+     main = "Choosing Optimal k for k-NN",
+     xlab = "k",
+     ylab = "Validation RMSE")
+
+best_k <- RMSE_df$k[which.min(RMSE_df$RMSE)]
+best_k
+```
+
+```{r}
+# Fit k-NN using the best k
+knn_train <- knn.reg(train = train_x_scaled,
+                     test = train_x_scaled,
+                     y = Boston_train$medv,
+                     k = best_k)
+
+knn_test <- knn.reg(train = train_x_scaled,
+                    test = test_x_scaled,
+                    y = Boston_train$medv,
+                    k = best_k)
+
+```
+
+```{r}
+# In-sample ASE
+knn_ase <- round(mean((Boston_train$medv - knn_train$pred)^2),2)
+knn_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+knn_mspe <- round(mean((Boston_test$medv - knn_test$pred)^2),2)
+knn_mspe
+```
+
+The k-NN model with k = 2 produced an in-sample ASE of 6.18 and an out-of-sample MSPE of 20.57, suggesting that nearby observations helped predict medv, although the model still had noticeable prediction error on the test set.
+
+```{r}
+# add results in table
+results <- rbind(results, data.frame(
+  Model = paste0("k-NN, k = ", best_k),
+  ASE_in_sample = knn_ase,
+  MSPE_out_sample = knn_mspe
+))
+```
+
+
+## Random Forest
+
+```{r}
+set.seed(1234)
+Boston_rf <- randomForest(medv ~ .,
+                          data = Boston_train,
+                          importance = TRUE,
+                          ntree = 500)
+
+Boston_rf
+```
+
+```{r}
+# Variable importance
+importance(Boston_rf)
+
+# OOB error plot
+plot(Boston_rf$mse,
+     type = "l",
+     lwd = 2,
+     main = "Random Forest OOB Error",
+     xlab = "Number of Trees",
+     ylab = "OOB Error")
+```
+
+```{r}
+# In-sample ASE
+rf_pred_train <- predict(Boston_rf, newdata = Boston_train)
+rf_ase <- round(mean((Boston_train$medv - rf_pred_train)^2),2)
+rf_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+rf_pred_test <- predict(Boston_rf, newdata = Boston_test)
+rf_mspe <- round(mean((Boston_test$medv - rf_pred_test)^2),2)
+rf_mspe
+```
+
+The random forest model produced an in-sample ASE of 2.14 and an out-of-sample MSPE of 11.80, showing that the ensemble of trees fit the training data closely and provided strong predictive performance on the test set.
+
+
+```{r}
+#add results in table
+results <- rbind(results, data.frame(
+  Model = "Random Forest",
+  ASE_in_sample = rf_ase,
+  MSPE_out_sample = rf_mspe
+))
+```
+
+## Boosting
+```{r}
+set.seed(1234)
+Boston_boost<- gbm(formula = medv~., 
+                   data = Boston_train, 
+                   distribution = "gaussian", 
+                   n.trees = 5000, 
+                   shrinkage = 0.1, 
+                   interaction.depth = 1) #boosting with defaults
+summary(Boston_boost)
+```
+
+```{r}
+# In-sample ASE
+boost_pred_train <- predict(Boston_boost, newdata = Boston_train)
+boost_ase <- round(mean((Boston_train$medv - boost_pred_train)^2),2)
+boost_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+boost_pred_test <- predict(Boston_boost, newdata = Boston_test)
+boost_mspe <- round(mean((Boston_test$medv - boost_pred_test)^2),2)
+boost_mspe
+```
+
+```{r}
+
+#add results in table
+results <- rbind(results, data.frame(
+  Model = "Boosting",
+  ASE_in_sample = boost_ase,
+  MSPE_out_sample = boost_mspe
+))
+```
+
+The boosting model produced an in-sample ASE of 2.25 and an out-of-sample MSPE of 12.48, indicating that the sequential tree-building process fit the training data very closely and captured complex patterns in the predictors.
+
+## GAM
+
+```{r}
+Boston_gam <- gam(medv ~ s(crim)+s(zn)+s(indus)+chas+s(nox)
+                  +s(rm)+s(age)+s(dis)+rad+s(tax)+s(ptratio)
+                  +s(black)+s(lstat),data=Boston_train)
+
+summary(Boston_gam)
+plot(Boston_gam, shade=TRUE, seWithMean=TRUE, scale=0, pages=1)
+```
+
+```{r}
+#refit  gam on Boston training (nonlinear to linear)
+
+Boston_gam_re <- gam(medv ~ s(crim)+zn+s(indus)+chas+s(nox)
+                     +s(rm)+age+s(dis)+rad+s(tax)+ptratio
+                     +black+s(lstat),data=Boston_train)
+
+summary(Boston_gam_re)
+plot(Boston_gam_re, shade=TRUE, seWithMean=TRUE, scale=0, pages=1)
+```
+
+```{r}
+# In-sample ASE
+gam_pred_train <- predict(Boston_gam_re, newdata = Boston_train)
+gam_ase <- round(mean((Boston_train$medv - gam_pred_train)^2),2)
+gam_ase
+```
+
+```{r}
+# Out-of-sample MSPE
+gam_pred_test <- predict(Boston_gam_re, newdata = Boston_test)
+gam_mspe <- round(mean((Boston_test$medv - gam_pred_test)^2),2)
+gam_mspe
+```
+
+The GAM produced an in-sample ASE of 8.16 and an out-of-sample MSPE of 14.79, showing that the smooth functions captured nonlinear relationships between the predictors and median home value.
+
+```{r}
+#add results in table
+results <- rbind(results, data.frame(
+  Model = "GAM",
+  ASE_in_sample = gam_ase,
+  MSPE_out_sample = gam_mspe
+))
+```
+
+## Neural Network
+
+```{r}
+#Scale both X &Y
+train_norm <- Boston_train
+test_norm <- Boston_test
+
+for (j in colnames(train_norm)) {
+  train_min <- min(Boston_train[[j]])
+  train_max <- max(Boston_train[[j]])
+  
+  train_norm[[j]] <- (Boston_train[[j]] - train_min) / (train_max - train_min)
+  test_norm[[j]] <- (Boston_test[[j]] - train_min) / (train_max - train_min)
+}
+```
+
+```{r}
+set.seed(1234)
+f <- as.formula("medv ~ .")
+nn_scaled <- neuralnet(f,data=train_norm, hidden=c(5,3), linear.output=T)
+plot(nn_scaled)
+```
+
+```{r}
+# in-sample ASE
+pr_nn_scaled_train <- compute(nn_scaled, train_norm[,1:p])
+
+## recover the predicted value back to the original response scale ## 
+pr_nn_org <- pr_nn_scaled_train$net.result*(max(Boston_train$medv)-min(Boston_train$medv))+min(Boston_train$medv)
+train_r <- (train_norm$medv)*(max(Boston_train$medv)-min(Boston_train$medv))+min(Boston_train$medv)
+
+nn_ase<-round(mean((train_r - pr_nn_org)^2),2) 
+nn_ase
+```
+
+```{r}
+# out-of-sample MSPE
+pr_nn_scaled_test <- compute(nn_scaled, test_norm[,1:p])
+pr_nn_org_t <- pr_nn_scaled_test$net.result*(max(Boston_train$medv)-min(Boston_train$medv))+min(Boston_train$medv)
+test_r <- (test_norm$medv)*(max(Boston_train$medv)-min(Boston_train$medv))+min(Boston_train$medv)
+
+nn_mspe <- round(mean((test_r - pr_nn_org_t)^2),2)
+nn_mspe
+```
+
+The neural network model produced an in-sample ASE of 4.77 and an out-of-sample MSPE of 12.48, suggesting that the hidden-layer structure learned nonlinear patterns in the data and generated accurate predictions on the test set.
+
+
+```{r}
+#add results in table
+results <- rbind(results, data.frame(
+  Model = "Neural Network",
+  ASE_in_sample = nn_ase,
+  MSPE_out_sample = nn_mspe
+))
+```
+
+
+# Model Comparison
+
+```{r}
+results$ASE_in_sample <- round(results$ASE_in_sample,2)
+results$MSPE_out_sample <- round(results$MSPE_out_sample,2)
+
+results[order(results$MSPE_out_sample), ]
+```
+
+Based on the model comparison table, Random Forest achieved the lowest out-of-sample MSPE of 11.80, making it the best-performing model for predicting median home value. Boosting and Neural Networks also performed well, both with MSPE values of 12.48, while GAM had moderate predictive performance. The pruned regression tree, k-NN, and linear regression had higher MSPE values, suggesting weaker prediction accuracy on the test data.
+
+```{r}
+
+#Feature Importance for our top model
+rf_importance <- importance(Boston_rf)
+
+rf_importance_df <- data.frame(
+  Variable = rownames(rf_importance),
+  Importance = rf_importance[, "%IncMSE"]
+)
+
+rf_importance_df <- rf_importance_df[order(rf_importance_df$Importance), ]
+
+barplot(rf_importance_df$Importance,
+        names.arg = rf_importance_df$Variable,
+        horiz = TRUE,
+        las = 1,
+        main = "Random Forest Feature Importance",
+        xlab = "% Increase in MSE")
+```
+
+The Random Forest feature importance chart shows that rm and lstat are the most influential predictors of median home value. This means that the average number of rooms and the percentage of lower-status population were the strongest variables used by the model to improve prediction accuracy.
